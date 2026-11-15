@@ -13,6 +13,7 @@ import { isListening } from './ports.ts'
 import { isAlive, signal, signalGroup, waitForDeath } from './proc.ts'
 import { knownProjects, readState, recordKey, rememberProject, updateState } from './state.ts'
 import { projectStatus } from './status.ts'
+import { withPortOffset } from './worktrees.ts'
 
 export const SUPERVISE_COMMAND = '__supervise'
 
@@ -29,21 +30,23 @@ export class UsageError extends Error {}
 
 // ---------------------------------------------------------------- projects
 
-export function resolveProject(cwd: string, name?: string): Project {
+/** `name` is a project name, or `name@worktree` for a worktree with its own ports. */
+export async function resolveProject(cwd: string, name?: string): Promise<Project> {
   if (name) {
     const { projects } = knownProjects()
-    const matches = projects.filter(project => project.name === name)
+    const exact = projects.filter(project => project.instance === name)
+    const matches = exact.length ? exact : projects.filter(project => project.name === name)
     if (matches.length === 0)
       throw new UsageError(`unknown project "${name}": run any portcall command once inside it so portcall knows where it is`)
     const here = matches.find(project => cwd === project.root || cwd.startsWith(`${project.root}/`))
     if (here || matches.length === 1)
-      return here ?? matches[0]!
-    throw new UsageError(`"${name}" exists in several checkouts, run portcall from the one you want:\n${matches.map(p => `  ${p.root}`).join('\n')}`)
+      return withPortOffset(here ?? matches[0]!)
+    throw new UsageError(`"${name}" exists in several checkouts, run portcall from the one you want${matches.some(p => p.worktree) ? ' or name it as project@worktree' : ''}:\n${matches.map(p => `  ${p.instance}  ${p.root}`).join('\n')}`)
   }
   const file = findConfig(cwd)
   if (!file)
     throw new ConfigError(`no portcall.json in ${cwd} or above (see \`portcall help\`)`)
-  const project = loadProject(file)
+  const project = await withPortOffset(loadProject(file, readState().offsets))
   rememberProject(project.root)
   return project
 }
@@ -62,6 +65,10 @@ function selectServices(project: Project, names: string[], runnableOnly = false)
 }
 
 // ---------------------------------------------------------------- output
+
+function worktreeFields(project: Project): { worktree?: string, portOffset?: number } {
+  return project.worktree ? { worktree: project.worktree, portOffset: project.portOffset } : {}
+}
 
 function table(rows: string[][]): string {
   const widths = rows[0]!.map((_, i) => Math.max(...rows.map(row => row[i]!.length)))
@@ -102,7 +109,7 @@ function statusRows(statuses: ServiceStatus[], withProject: boolean): string[][]
   const head = [...(withProject ? ['PROJECT'] : []), 'SERVICE', 'STATE', 'PORT', 'PID', 'UPTIME', 'INFO']
   const now = Date.now()
   return [head, ...statuses.map(s => [
-    ...(withProject ? [s.project] : []),
+    ...(withProject ? [s.worktree ? `${s.project}@${s.worktree}` : s.project] : []),
     s.service,
     s.state,
     String(s.port),
@@ -128,9 +135,9 @@ export async function status(io: Io, cwd: string, opts: { project?: string, all?
     }
     return 0
   }
-  const project = resolveProject(cwd, opts.project)
+  const project = await resolveProject(cwd, opts.project)
   const statuses = await projectStatus(project, state)
-  io.out(io.json ? JSON.stringify({ project: project.name, root: project.root, services: statuses }, null, 2) : table(statusRows(statuses, false)))
+  io.out(io.json ? JSON.stringify({ project: project.name, ...worktreeFields(project), root: project.root, services: statuses }, null, 2) : table(statusRows(statuses, false)))
   return 0
 }
 
@@ -151,9 +158,9 @@ interface UpResult {
 const UP_FAILURES: Outcome[] = ['crashed', 'timeout', 'blocked']
 
 function startService(project: Project, service: Service, state: { services: Record<string, ServiceRecord> }): { pid: number, exited: () => boolean } {
-  const log = logPath(project.name, service.name)
+  const log = logPath(project.instance, service.name)
   const spec: SuperviseSpec = {
-    project: project.name,
+    project: project.instance,
     service: service.name,
     command: service.command!,
     cwd: service.cwd,
@@ -173,8 +180,8 @@ function startService(project: Project, service: Service, state: { services: Rec
     exited = true
   })
   child.unref()
-  state.services[recordKey(project.name, service.name)] = {
-    project: project.name,
+  state.services[recordKey(project.instance, service.name)] = {
+    project: project.instance,
     service: service.name,
     root: project.root,
     port: service.port,
@@ -200,7 +207,7 @@ async function waitReady(service: Service, exited: () => boolean): Promise<'read
 }
 
 export async function up(io: Io, cwd: string, names: string[], opts: { project?: string, wait: boolean }): Promise<number> {
-  const project = resolveProject(cwd, opts.project)
+  const project = await resolveProject(cwd, opts.project)
   const services = selectServices(project, names)
   const statuses = await projectStatus(project, readState(), services)
   const results: UpResult[] = []
@@ -238,9 +245,9 @@ export async function up(io: Io, cwd: string, names: string[], opts: { project?:
     const ready = await waitReady(service, exited)
     if (ready === 'ready')
       return { ...base, outcome: 'started', detail: `ready in ${((Date.now() - t0) / 1000).toFixed(1)}s` }
-    const logTail = readLog(logPath(project.name, service.name), service.name).slice(-CRASH_TAIL_LINES).map(l => formatLine(l))
+    const logTail = readLog(logPath(project.instance, service.name), service.name).slice(-CRASH_TAIL_LINES).map(l => formatLine(l))
     if (ready === 'exited') {
-      const record = readState().services[recordKey(project.name, service.name)]
+      const record = readState().services[recordKey(project.instance, service.name)]
       return { ...base, outcome: 'crashed', detail: `exited before listening (code ${record?.exitCode ?? '?'})`, logTail }
     }
     return { ...base, outcome: 'timeout', detail: `still running but nothing listens on ${service.port} after ${service.readyTimeout}s (wrong port in portcall.json?)`, logTail }
@@ -250,7 +257,7 @@ export async function up(io: Io, cwd: string, names: string[], opts: { project?:
   results.sort((a, b) => order.get(a.service)! - order.get(b.service)!)
   const failed = results.some(r => UP_FAILURES.includes(r.outcome))
   if (io.json) {
-    io.out(JSON.stringify({ project: project.name, ok: !failed, services: results }, null, 2))
+    io.out(JSON.stringify({ project: project.name, ...worktreeFields(project), ok: !failed, services: results }, null, 2))
   }
   else {
     io.out(table([['SERVICE', 'RESULT', 'URL', 'PID', 'INFO'], ...results.map(r => [r.service, r.outcome, r.url, r.pid ? String(r.pid) : '-', r.detail ?? ''])]))
@@ -293,12 +300,12 @@ interface DownResult {
 }
 
 export async function down(io: Io, cwd: string, names: string[], opts: { project?: string, force?: boolean, quiet?: boolean }): Promise<number> {
-  const project = resolveProject(cwd, opts.project)
+  const project = await resolveProject(cwd, opts.project)
   const services = selectServices(project, names)
   const state = readState()
   const statuses = await projectStatus(project, state, services)
   const results = await Promise.all(statuses.map(async (st): Promise<DownResult> => {
-    const record = state.services[recordKey(project.name, st.service)]
+    const record = state.services[recordKey(project.instance, st.service)]
     if (st.external)
       return { service: st.service, outcome: 'skipped', detail: 'external, not managed by portcall' }
     switch (st.state) {
@@ -333,7 +340,7 @@ export async function down(io: Io, cwd: string, names: string[], opts: { project
 }
 
 export async function restart(io: Io, cwd: string, names: string[], opts: { project?: string, force?: boolean, wait: boolean }): Promise<number> {
-  const project = resolveProject(cwd, opts.project)
+  const project = await resolveProject(cwd, opts.project)
   const runnable = selectServices(project, names, true).map(s => s.name)
   await down(io, cwd, runnable, { ...opts, quiet: true })
   return up(io, cwd, runnable, opts)
@@ -342,9 +349,9 @@ export async function restart(io: Io, cwd: string, names: string[], opts: { proj
 // ---------------------------------------------------------------- logs
 
 export async function logs(io: Io, cwd: string, names: string[], opts: { project?: string, filter: LogFilter, follow?: boolean }): Promise<number> {
-  const project = resolveProject(cwd, opts.project)
+  const project = await resolveProject(cwd, opts.project)
   const services = selectServices(project, names, true)
-  const files = services.map(s => ({ file: logPath(project.name, s.name), service: s.name }))
+  const files = services.map(s => ({ file: logPath(project.instance, s.name), service: s.name }))
   const width = services.length > 1 ? Math.max(...services.map(s => s.name.length)) : 0
   const lines = filterLines(mergeLogs(files.map(f => readLog(f.file, f.service))), opts.filter)
   const toJson = (l: LogLine): object => ({ time: l.time?.toISOString(), service: l.service, stream: l.tag, text: l.text })
@@ -364,25 +371,26 @@ export async function logs(io: Io, cwd: string, names: string[], opts: { project
 // ---------------------------------------------------------------- ports
 
 export async function ports(io: Io, cwd: string): Promise<number> {
-  const file = findConfig(cwd)
-  if (file)
-    rememberProject(loadProject(file).root)
+  if (findConfig(cwd))
+    await resolveProject(cwd)
   const { projects, errors } = knownProjects()
   const state = readState()
-  // Checkouts of one project (worktrees) share its ports by design: compare by name.
+  // Checkouts share external services, and every port without `worktrees: true`: those claims go by project name.
+  const claimant = (project: Project, service: Service): string => service.command ? project.instance : project.name
   const claims = new Map<number, Set<string>>()
   for (const project of projects) {
     for (const service of project.services)
-      claims.set(service.port, (claims.get(service.port) ?? new Set()).add(project.name))
+      claims.set(service.port, (claims.get(service.port) ?? new Set()).add(claimant(project, service)))
   }
   const seen = new Set<string>()
   const rows: (ServiceStatus & { conflict: string[] })[] = []
   for (const project of projects) {
-    if (seen.has(project.name))
+    if (seen.has(project.instance))
       continue
-    seen.add(project.name)
-    for (const st of await projectStatus(project, state)) {
-      const others = [...claims.get(st.port)!].filter(name => name !== project.name)
+    seen.add(project.instance)
+    for (const [i, st] of (await projectStatus(project, state)).entries()) {
+      const own = claimant(project, project.services[i]!)
+      const others = [...claims.get(st.port)!].filter(name => name !== own)
       rows.push({ ...st, conflict: others })
     }
   }
@@ -394,7 +402,7 @@ export async function ports(io: Io, cwd: string): Promise<number> {
     io.out(rows.length
       ? table([['PORT', 'PROJECT', 'SERVICE', 'STATE', 'INFO'], ...rows.map(r => [
           String(r.port),
-          r.project,
+          r.worktree ? `${r.project}@${r.worktree}` : r.project,
           r.service,
           r.state,
           [r.conflict.length ? `CONFLICT with ${r.conflict.join(', ')}` : '', describe(r)].filter(Boolean).join('; '),

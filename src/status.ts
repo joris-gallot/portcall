@@ -21,6 +21,10 @@ export interface ServiceStatus {
   project: string
   service: string
   port: number
+  /** Set in a worktree with its own ports: the port declared in portcall.json. */
+  basePort?: number
+  /** Set in a linked worktree of a `worktrees: true` project. */
+  worktree?: string
   url: string
   state: ServiceState
   external: boolean
@@ -42,10 +46,12 @@ export async function serviceStatus(project: Project, service: Service, state: S
     project: project.name,
     service: service.name,
     port: service.port,
+    ...(service.port !== service.basePort ? { basePort: service.basePort } : {}),
+    ...(project.worktree ? { worktree: project.worktree } : {}),
     url: `http://localhost:${service.port}`,
     external: !service.command,
   }
-  const record = state.services[recordKey(project.name, service.name)]
+  const record = state.services[recordKey(project.instance, service.name)]
 
   if (record) {
     const alive = isAlive(record.supervisorPid) || isAlive(record.childPid)
@@ -57,7 +63,7 @@ export async function serviceStatus(project: Project, service: Service, state: S
     return { ...base, ...managed, state: await isListening(service.port) ? 'running' : 'starting' }
   }
 
-  const log = service.command ? logPath(project.name, service.name) : undefined
+  const log = service.command ? logPath(project.instance, service.name) : undefined
   if (!(await isListening(service.port)))
     return { ...base, log, state: 'stopped' }
   if (base.external)

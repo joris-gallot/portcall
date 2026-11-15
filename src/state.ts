@@ -1,4 +1,4 @@
-import type { Project } from './config.ts'
+import type { PortOffsets, Project } from './config.ts'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import process from 'node:process'
@@ -23,6 +23,8 @@ export interface ServiceRecord {
 
 export interface State {
   services: Record<string, ServiceRecord>
+  /** Worktrees of `worktrees: true` projects, by checkout root. */
+  offsets?: PortOffsets
 }
 
 const LOCK_WAIT_MS = 5000
@@ -119,13 +121,14 @@ export function knownProjects(): KnownProjects {
   const errors: string[] = []
   const kept: string[] = []
   const roots = readRoots()
+  const offsets = readState().offsets
   for (const root of roots) {
     const file = join(root, CONFIG_FILE)
     if (!existsSync(file))
       continue
     kept.push(root)
     try {
-      projects.push(loadProject(file))
+      projects.push(loadProject(file, offsets))
     }
     catch (error) {
       errors.push((error as Error).message)

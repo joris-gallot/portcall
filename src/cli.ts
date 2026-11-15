@@ -21,7 +21,8 @@ Usage:
   portcall agents                 Print an AGENTS.md section telling coding agents how to use portcall
 
 Options:
-  -p, --project <name>  Act on a known project from anywhere (default: the portcall.json at or above the cwd)
+  -p, --project <name>  Act on a known project from anywhere (default: the portcall.json at or above the cwd);
+                        <name>@<worktree> for a git worktree with its own ports
   -C, --cwd <dir>       Run as if started in <dir>
       --json            Machine-readable output
       --no-wait         up/restart: return without waiting for the port
@@ -47,6 +48,7 @@ portcall.json, at the project root:
   }
   A service without "command" is external (a database in Docker...): portcall only checks its port.
   Each command gets PORT set to its port. Logs and state live in ~/.portcall (PORTCALL_HOME).
+  "worktrees": true gives each git worktree its own ports (declared + an offset), so they run at once.
 `
 
 async function main(argv: string[]): Promise<number> {

@@ -43,6 +43,22 @@ Node 20.19+, macOS or Linux.
 - Each command runs with `PORT` set to its service's port. `env` takes `{port}` and `{ports.<service>}`.
 - A service without `command` is external (a database in Docker, a tunnel...): portcall only checks that its port answers.
 - `cwd` runs a command in a subfolder; `readyTimeout` (seconds, default 60) bounds how long `up` waits for the port.
+- `"worktrees": true` lets each git worktree run its own servers at the same time (see below).
+
+### Git worktrees
+
+By default, every checkout of a project shares its declared ports: one checkout runs a service at a time, and the others see it as `elsewhere`.
+
+With `"worktrees": true`, each linked worktree gets its own ports. The first time portcall runs in a worktree, it picks an offset (a multiple of 10) that moves the worktree's services onto ports no known project declares and nothing listens on, and keeps it. The main checkout keeps the declared ports, and external services (a database...) keep theirs: worktrees share them.
+
+```sh
+cd ../myapp-feature-x      # git worktree add ../myapp-feature-x
+portcall up                # server on 3010, web on 5183 (offset 10)
+portcall status --json     # "port": 3010, "basePort": 3000, "worktree": "myapp-feature-x"
+portcall logs -p myapp@myapp-feature-x
+```
+
+This only works if the app takes its ports from portcall rather than hardcoding them: read `PORT` (in `vite.config`, `server: { port: Number(process.env.PORT) || 5173, strictPort: true }`), and pass the other services' URLs through `env` with `{ports.<service>}`, including proxy targets and allowed origins.
 
 ## Commands
 
@@ -56,7 +72,7 @@ Node 20.19+, macOS or Linux.
 | `portcall ports` | Every known project's ports, with conflicts. Exits 1 on a conflict. |
 | `portcall agents` | Prints a section to paste into `AGENTS.md` / `CLAUDE.md`. |
 
-Every command takes `--json`, `-p <project>` (act on a known project from anywhere) and `-C <dir>`.
+Every command takes `--json`, `-p <project>` (act on a known project from anywhere; `<project>@<worktree>` for a worktree with its own ports) and `-C <dir>`.
 
 ### Service states
 
@@ -67,7 +83,7 @@ Every command takes `--json`, `-p <project>` (act on a known project from anywhe
 | `stopped` | nothing on its port |
 | `unmanaged` | its port is held by a process started inside the project, outside portcall (say, in a terminal). `up` leaves it be; `down --force` stops it |
 | `taken` | its port is held by something outside the project. portcall never touches it |
-| `elsewhere` | portcall runs it from another checkout of the project (a git worktree) |
+| `elsewhere` | portcall runs it from another checkout of the project (a git worktree, without `"worktrees": true`) |
 
 ## With coding agents
 

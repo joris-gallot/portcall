@@ -56,6 +56,10 @@
         "additionalProperties": false
       },
       "description": "The project's services, by name."
+    },
+    "worktrees": {
+      "description": "Let each git worktree of the project run its services at the same time, on ports offset from the declared ones (external services keep theirs). Commands must take their port from PORT and {ports.<service>}. Default: false, all checkouts share the declared ports.",
+      "type": "boolean"
     }
   },
   "required": [

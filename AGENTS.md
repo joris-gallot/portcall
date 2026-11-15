@@ -9,6 +9,7 @@ CLI that runs local dev servers detached, on the ports declared in each project'
 - `src/supervise.ts`: the detached per-service supervisor (process group, timestamped log, exit record).
 - `src/status.ts`: a service's state from the state file, its pids and its port.
 - `src/state.ts`: `~/.portcall/state.json` (locked updates) and the known projects list.
+- `src/worktrees.ts`: picks the port offset of a git worktree when the project sets `worktrees: true`.
 - `src/config.ts`: `portcall.json` schema (zod). Run `node scripts/schema.ts` after changing it, to regenerate `schema.json`.
 
 ## Conventions
