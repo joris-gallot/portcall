@@ -1,7 +1,7 @@
 import type { Project, Service } from './config.ts'
 import type { LogFilter, LogLine } from './logs.ts'
 import type { ServiceRecord } from './state.ts'
-import type { ServiceStatus } from './status.ts'
+import type { ServiceStatus, UndeclaredListener } from './status.ts'
 import type { SuperviseSpec } from './supervise.ts'
 import { spawn } from 'node:child_process'
 import process from 'node:process'
@@ -9,15 +9,17 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { ConfigError, findConfig, loadProject } from './config.ts'
 import { filterLines, followLogs, formatLine, mergeLogs, readLog } from './logs.ts'
 import { logPath } from './paths.ts'
-import { isListening } from './ports.ts'
+import { isListening, treePorts } from './ports.ts'
 import { isAlive, signal, signalGroup, waitForDeath } from './proc.ts'
 import { knownProjects, readState, recordKey, rememberProject, updateState } from './state.ts'
-import { projectStatus } from './status.ts'
+import { projectStatus, undeclaredListeners } from './status.ts'
 import { withPortOffset } from './worktrees.ts'
 
 export const SUPERVISE_COMMAND = '__supervise'
 
 const STOP_WAIT_MS = 8000
+// How long a new service may listen elsewhere than its port before `up` calls it a wrong port.
+const WRONG_PORT_GRACE_MS = 3000
 const CRASH_TAIL_LINES = 30
 
 export interface Io {
@@ -100,6 +102,8 @@ function describe(status: ServiceStatus): string {
       return `port held by ${status.holder ? `${short(status.holder.command)} (${status.holder.cwd ?? '?'})` : 'another process'}`
     case 'elsewhere':
       return `run from ${status.root}`
+    case 'starting':
+      return status.listeningOn ? `listening on ${status.listeningOn.join(', ')}, not ${status.port}` : ''
     default:
       return status.external ? 'external' : ''
   }
@@ -119,31 +123,54 @@ function statusRows(statuses: ServiceStatus[], withProject: boolean): string[][]
   ])]
 }
 
+function undeclaredTable(listeners: UndeclaredListener[], roots: Map<string, string>, withProject: boolean): string {
+  const rel = (l: UndeclaredListener): string => {
+    const root = roots.get(l.worktree ? `${l.project}@${l.worktree}` : l.project) ?? ''
+    return l.cwd.startsWith(root) ? `.${l.cwd.slice(root.length)}` || '.' : l.cwd
+  }
+  return `\nListening in the project on ports portcall.json does not declare (a server on the wrong port, or a forgotten one):\n${table([
+    [...(withProject ? ['PROJECT'] : []), 'PORT', 'PID', 'CWD', 'COMMAND'],
+    ...listeners.map(l => [...(withProject ? [l.worktree ? `${l.project}@${l.worktree}` : l.project] : []), String(l.port), String(l.pid), rel(l), short(l.command)]),
+  ])}`
+}
+
 // ---------------------------------------------------------------- status
 
 export async function status(io: Io, cwd: string, opts: { project?: string, all?: boolean }): Promise<number> {
   const state = readState()
   if (opts.all) {
     const { projects, errors } = knownProjects()
-    const statuses = (await Promise.all(projects.map(p => projectStatus(p, state)))).flat()
+    const [statuses, undeclaredPorts] = await Promise.all([
+      Promise.all(projects.map(p => projectStatus(p, state))).then(all => all.flat()),
+      undeclaredListeners(projects, state),
+    ])
     if (io.json) {
-      io.out(JSON.stringify({ services: statuses, errors }, null, 2))
+      io.out(JSON.stringify({ services: statuses, undeclaredPorts, errors }, null, 2))
     }
     else {
       io.out(statuses.length ? table(statusRows(statuses, true)) : 'no known projects yet: run portcall once inside a project')
+      if (undeclaredPorts.length)
+        io.out(undeclaredTable(undeclaredPorts, new Map(projects.map(p => [p.instance, p.root])), true))
       errors.forEach(e => io.err(`portcall: ${e}`))
     }
     return 0
   }
   const project = await resolveProject(cwd, opts.project)
-  const statuses = await projectStatus(project, state)
-  io.out(io.json ? JSON.stringify({ project: project.name, ...worktreeFields(project), root: project.root, services: statuses }, null, 2) : table(statusRows(statuses, false)))
+  const [statuses, undeclaredPorts] = await Promise.all([projectStatus(project, state), undeclaredListeners([project], state)])
+  if (io.json) {
+    io.out(JSON.stringify({ project: project.name, ...worktreeFields(project), root: project.root, services: statuses, undeclaredPorts }, null, 2))
+  }
+  else {
+    io.out(table(statusRows(statuses, false)))
+    if (undeclaredPorts.length)
+      io.out(undeclaredTable(undeclaredPorts, new Map([[project.instance, project.root]]), false))
+  }
   return 0
 }
 
 // ---------------------------------------------------------------- up
 
-type Outcome = 'started' | 'already-running' | 'running-outside' | 'external-up' | 'external-down' | 'crashed' | 'timeout' | 'blocked'
+type Outcome = 'started' | 'already-running' | 'running-outside' | 'external-up' | 'external-down' | 'crashed' | 'timeout' | 'wrong-port' | 'blocked'
 
 interface UpResult {
   service: string
@@ -152,10 +179,11 @@ interface UpResult {
   outcome: Outcome
   pid?: number
   detail?: string
+  listeningOn?: number[]
   logTail?: string[]
 }
 
-const UP_FAILURES: Outcome[] = ['crashed', 'timeout', 'blocked']
+const UP_FAILURES: Outcome[] = ['crashed', 'timeout', 'wrong-port', 'blocked']
 
 function startService(project: Project, service: Service, state: { services: Record<string, ServiceRecord> }): { pid: number, exited: () => boolean } {
   const log = logPath(project.instance, service.name)
@@ -193,15 +221,34 @@ function startService(project: Project, service: Service, state: { services: Rec
   return { pid: child.pid, exited: () => exited }
 }
 
-async function waitReady(service: Service, exited: () => boolean): Promise<'ready' | 'exited' | 'timeout'> {
+interface Readiness {
+  result: 'ready' | 'exited' | 'timeout' | 'wrong-port'
+  /** Ports the service's process group listened on instead of its own. */
+  listeningOn?: number[]
+}
+
+async function waitReady(project: Project, service: Service, exited: () => boolean): Promise<Readiness> {
   const deadline = Date.now() + service.readyTimeout * 1000
+  let elsewhere: number[] = []
+  let elsewhereSince: number | undefined
+  let lastCheck = 0
   for (;;) {
     if (exited())
-      return 'exited'
+      return { result: 'exited' }
     if (await isListening(service.port, 300))
-      return 'ready'
+      return { result: 'ready' }
+    if (Date.now() - lastCheck >= 1000) {
+      lastCheck = Date.now()
+      const child = readState().services[recordKey(project.instance, service.name)]?.childPid
+      const ports = child ? await treePorts(child) : []
+      // Its own port among them means it answers on another interface: not a wrong port.
+      elsewhere = ports.includes(service.port) ? [] : ports
+      elsewhereSince = elsewhere.length ? elsewhereSince ?? Date.now() : undefined
+      if (elsewhereSince !== undefined && Date.now() - elsewhereSince >= WRONG_PORT_GRACE_MS)
+        return { result: 'wrong-port', listeningOn: elsewhere }
+    }
     if (Date.now() > deadline)
-      return 'timeout'
+      return { result: 'timeout', ...(elsewhere.length ? { listeningOn: elsewhere } : {}) }
     await sleep(200)
   }
 }
@@ -242,15 +289,19 @@ export async function up(io: Io, cwd: string, names: string[], opts: { project?:
     if (!opts.wait)
       return { ...base, outcome: 'started', detail: 'not waiting for the port' }
     const t0 = Date.now()
-    const ready = await waitReady(service, exited)
-    if (ready === 'ready')
+    const { result, listeningOn } = await waitReady(project, service, exited)
+    if (result === 'ready')
       return { ...base, outcome: 'started', detail: `ready in ${((Date.now() - t0) / 1000).toFixed(1)}s` }
+    const record = readState().services[recordKey(project.instance, service.name)]
+    if (result === 'wrong-port' && record)
+      await stopRecord(record)
     const logTail = readLog(logPath(project.instance, service.name), service.name).slice(-CRASH_TAIL_LINES).map(l => formatLine(l))
-    if (ready === 'exited') {
-      const record = readState().services[recordKey(project.instance, service.name)]
+    if (result === 'exited')
       return { ...base, outcome: 'crashed', detail: `exited before listening (code ${record?.exitCode ?? '?'})`, logTail }
-    }
-    return { ...base, outcome: 'timeout', detail: `still running but nothing listens on ${service.port} after ${service.readyTimeout}s (wrong port in portcall.json?)`, logTail }
+    if (result === 'wrong-port')
+      return { ...base, outcome: 'wrong-port', listeningOn, detail: `listened on ${listeningOn!.join(', ')} instead of ${service.port}, so portcall stopped it: make it listen on PORT (for Vite or Astro: server.port with strictPort)`, logTail }
+    const instead = listeningOn ? `listens on ${listeningOn.join(', ')} but not` : 'nothing listens'
+    return { ...base, outcome: 'timeout', ...(listeningOn ? { listeningOn } : {}), detail: `still running but ${instead} on ${service.port} after ${service.readyTimeout}s (wrong port in portcall.json?)`, logTail }
   })))
 
   const order = new Map(services.map((s, i) => [s.name, i]))

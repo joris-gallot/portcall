@@ -64,10 +64,10 @@ This only works if the app takes its ports from portcall rather than hardcoding 
 
 | Command | |
 | --- | --- |
-| `portcall up [service...]` | Start services and wait for their port. A no-op for services already running; prints the log tail when one crashes. |
+| `portcall up [service...]` | Start services and wait for their port. A no-op for services already running; prints the log tail when one crashes. A service that listens on another port than its own (Vite without `strictPort` when its port is taken...) is stopped and reported as `wrong-port`. |
 | `portcall down [service...]` | Stop services (the whole process group, so `pnpm dev` takes its children with it). |
 | `portcall restart [service...]` | Stop, then start. |
-| `portcall status [--all]` | State, port, pid and uptime of each service; `--all` for every known project. |
+| `portcall status [--all]` | State, port, pid and uptime of each service; `--all` for every known project. Also lists processes started in the project that listen on ports `portcall.json` does not declare (`undeclaredPorts`): a server on the wrong port, or a forgotten one. |
 | `portcall logs [service...]` | `-n 200`, `--since 5m`, `--grep <regex>`, `--errors`, `-f`. |
 | `portcall ports` | Every known project's ports, with conflicts. Exits 1 on a conflict. |
 | `portcall agents` | Prints a section to paste into `AGENTS.md` / `CLAUDE.md`. |

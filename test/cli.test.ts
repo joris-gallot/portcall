@@ -37,6 +37,9 @@ async function freePort(): Promise<number> {
 let root: string
 let home: string
 const ports: Record<string, number> = {}
+// Not declared in portcall.json.
+let slidTo: number
+let stray: number
 
 function run(...args: string[]): { code: number, out: any, text: string } {
   const result = spawnSync(process.execPath, [CLI, ...args], {
@@ -61,8 +64,10 @@ function service(out: any, name: string): any {
 beforeAll(async () => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'portcall-app-')))
   home = realpathSync(mkdtempSync(join(tmpdir(), 'portcall-home-')))
-  for (const name of ['api', 'crash', 'db', 'taken'])
+  for (const name of ['api', 'crash', 'db', 'taken', 'slid'])
     ports[name] = await freePort()
+  slidTo = await freePort()
+  stray = await freePort()
   writeFileSync(join(root, 'server.mjs'), SERVER)
   writeFileSync(join(root, 'portcall.json'), JSON.stringify({
     name: 'demo',
@@ -71,6 +76,8 @@ beforeAll(async () => {
       crash: { command: `node -e "console.error('Error: cannot find module x'); process.exit(3)"`, port: ports.crash, readyTimeout: 10 },
       db: { port: ports.db },
       taken: { command: 'node server.mjs', port: ports.taken, readyTimeout: 10 },
+      // Like Vite without strictPort when its port is taken: it listens on the next one.
+      slid: { command: `PORT=${slidTo} node server.mjs`, port: ports.slid, readyTimeout: 20 },
     },
   }))
 })
@@ -142,6 +149,31 @@ describe('portcall', () => {
       expect(service(run('down', 'taken', '--json').out, 'taken')).toMatchObject({ outcome: 'skipped' })
       expect(service(run('down', 'taken', '--force', '--json').out, 'taken')).toMatchObject({ outcome: 'stopped' })
       expect(await isListening(ports.taken!)).toBe(false)
+    }
+    finally {
+      manual.kill()
+    }
+  })
+
+  it('stops a service that listens on another port than its own', async () => {
+    const t0 = Date.now()
+    const { code, out } = run('up', 'slid', '--json')
+    expect(code).toBe(1)
+    expect(service(out, 'slid')).toMatchObject({ outcome: 'wrong-port', listeningOn: [slidTo] })
+    expect(Date.now() - t0).toBeLessThan(15_000)
+    expect(await isListening(slidTo)).toBe(false)
+    expect(service(run('status', '--json').out, 'slid')).toMatchObject({ state: 'stopped' })
+  })
+
+  it('lists project processes listening on undeclared ports', async () => {
+    const manual: ChildProcess = spawn(process.execPath, ['server.mjs'], { cwd: root, env: { ...process.env, PORT: String(stray) }, stdio: 'ignore' })
+    try {
+      for (let i = 0; i < 50 && !(await isListening(stray)); i++)
+        await new Promise(resolve => setTimeout(resolve, 100))
+      const { out } = run('status', '--json')
+      expect(out.undeclaredPorts).toEqual([expect.objectContaining({ project: 'demo', port: stray, pid: manual.pid, cwd: root })])
+      // Servers portcall runs are not reported, whatever else they listen on.
+      expect(out.undeclaredPorts.map((l: any) => l.port)).not.toContain(ports.api)
     }
     finally {
       manual.kill()
