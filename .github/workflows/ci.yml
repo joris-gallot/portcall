@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - .gitignore
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - .gitignore
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      # engines.node is the supported range; .node-version pins the dev version (tests need type stripping).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+      - name: schema.json is up to date
+        run: |
+          pnpm schema
+          git diff --exit-code schema.json
+
+  # The published bundle on the oldest Node that engines.node allows.
+  min_node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - id: engines
+        run: echo "node=$(node -p "require('./package.json').engines.node.replace(/^>=\s*/, '')")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.engines.outputs.node }}
+
+      - name: Smoke test dist/portcall.mjs
+        env:
+          PORTCALL_HOME: ${{ runner.temp }}/portcall-home
+        run: |
+          node --version
+          cli="$GITHUB_WORKSPACE/dist/portcall.mjs"
+          dir="$RUNNER_TEMP/smoke"
+          mkdir -p "$dir" && cd "$dir"
+          printf "import { createServer } from 'node:http'\ncreateServer((req, res) => res.end('ok')).listen(process.env.PORT)\n" > server.mjs
+          echo '{"name":"smoke","services":{"web":{"command":"node server.mjs","port":4719}}}' > portcall.json
+          node "$cli" up
+          node "$cli" status --json | jq -e '.services[0].state == "running"'
+          curl -sf http://localhost:4719
+          node "$cli" down
+          node "$cli" status --json | jq -e '.services[0].state == "stopped"'
