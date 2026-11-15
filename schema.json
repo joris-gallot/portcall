@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^\\w[\\w.-]*$",
+      "description": "Project name, used by `portcall -p <name>` and in the logs folder."
+    },
+    "services": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^\\w[\\w.-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "description": "Shell command that runs the service. Omit it for an external service (a database in Docker...): portcall then only checks its port.",
+            "type": "string",
+            "minLength": 1
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Port the service listens on. Also passed to the command as PORT."
+          },
+          "cwd": {
+            "description": "Directory to run the command in, relative to portcall.json. Default: the project root.",
+            "type": "string"
+          },
+          "env": {
+            "description": "Extra environment. {port} is this service's port, {ports.<service>} another service's.",
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "readyTimeout": {
+            "description": "Seconds `portcall up` waits for the port. Default: 60.",
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": [
+          "port"
+        ],
+        "additionalProperties": false
+      },
+      "description": "The project's services, by name."
+    }
+  },
+  "required": [
+    "name",
+    "services"
+  ],
+  "additionalProperties": false,
+  "title": "portcall.json"
+}
