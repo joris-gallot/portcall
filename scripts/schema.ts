@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs'
-import { z } from 'zod'
+import * as z from 'zod/mini'
 import { configSchema } from '../src/config.ts'
 
 const schema = { ...z.toJSONSchema(configSchema), title: 'portcall.json' }

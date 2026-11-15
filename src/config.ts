@@ -1,25 +1,29 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { z } from 'zod'
+import { en } from 'zod/locales'
+import * as z from 'zod/mini'
+
+// zod/mini ships no messages by default.
+z.config(en())
 
 export const CONFIG_FILE = 'portcall.json'
 
 const DEFAULT_READY_TIMEOUT = 60
 
-const nameSchema = z.string().regex(/^\w[\w.-]*$/, 'use letters, digits, dot, dash or underscore')
+const nameSchema = z.string().check(z.regex(/^\w[\w.-]*$/, 'use letters, digits, dot, dash or underscore'))
 
 const serviceSchema = z.strictObject({
-  command: z.string().min(1).optional().describe('Shell command that runs the service. Omit it for an external service (a database in Docker...): portcall then only checks its port.'),
-  port: z.number().int().min(1).max(65535).describe('Port the service listens on. Also passed to the command as PORT.'),
-  cwd: z.string().optional().describe('Directory to run the command in, relative to portcall.json. Default: the project root.'),
-  env: z.record(z.string(), z.string()).optional().describe('Extra environment. {port} is this service\'s port, {ports.<service>} another service\'s.'),
-  readyTimeout: z.number().positive().optional().describe('Seconds `portcall up` waits for the port. Default: 60.'),
+  command: z.optional(z.string().check(z.minLength(1))).check(z.describe('Shell command that runs the service. Omit it for an external service (a database in Docker...): portcall then only checks its port.')),
+  port: z.int().check(z.minimum(1), z.maximum(65535), z.describe('Port the service listens on. Also passed to the command as PORT.')),
+  cwd: z.optional(z.string()).check(z.describe('Directory to run the command in, relative to portcall.json. Default: the project root.')),
+  env: z.optional(z.record(z.string(), z.string())).check(z.describe('Extra environment. {port} is this service\'s port, {ports.<service>} another service\'s.')),
+  readyTimeout: z.optional(z.number().check(z.positive())).check(z.describe('Seconds `portcall up` waits for the port. Default: 60.')),
 })
 
 export const configSchema = z.strictObject({
-  $schema: z.string().optional(),
-  name: nameSchema.describe('Project name, used by `portcall -p <name>` and in the logs folder.'),
-  services: z.record(nameSchema, serviceSchema).describe('The project\'s services, by name.'),
+  $schema: z.optional(z.string()),
+  name: nameSchema.check(z.describe('Project name, used by `portcall -p <name>` and in the logs folder.')),
+  services: z.record(nameSchema, serviceSchema).check(z.describe('The project\'s services, by name.')),
 })
 
 export interface Service {
