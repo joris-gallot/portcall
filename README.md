@@ -89,6 +89,8 @@ Every command takes `--json`, `-p <project>` (act on a known project from anywhe
 
 Run `portcall agents` and paste the result into the project's agent instructions. Agents then check `portcall status` instead of guessing, start servers with `portcall up` (which never starts a second copy), and read `portcall logs --errors` after a failing request instead of asking you to copy the terminal.
 
+In [Zeron](https://zeron.sh), the [portcall plugin](https://github.com/joris-gallot/portcall-zeron) shows a project's servers beside the chat, with start, stop and their errors.
+
 ## How it works
 
 `portcall up` starts one small detached supervisor per service. It runs the command in its own process group, writes its output, timestamped and without escape codes, to `~/.portcall/logs/<project>/<service>.log` (the previous run is kept as `.log.1`), and records how the service ended. State lives in `~/.portcall` (`PORTCALL_HOME` to move it). Servers keep running when the terminal or agent session that started them ends.
