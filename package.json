@@ -1,7 +1,7 @@
 {
   "name": "portcall",
   "type": "module",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "packageManager": "pnpm@12.18.0",
   "description": "Run your local dev servers in the background, on fixed ports, with logs your coding agents can read",
   "author": "Joris Gallot",
