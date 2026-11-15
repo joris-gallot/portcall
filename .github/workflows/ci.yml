@@ -6,10 +6,8 @@ on:
     paths-ignore:
       - '**/*.md'
       - .gitignore
+  # No paths-ignore: the ruleset requires these checks, a skipped run would block the pull request.
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - .gitignore
 
 permissions:
   contents: read
