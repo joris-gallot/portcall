@@ -6,6 +6,12 @@
   "description": "Run your local dev servers in the background, on fixed ports, with logs your coding agents can read",
   "author": "Joris Gallot",
   "license": "MIT",
+  "homepage": "https://github.com/joris-gallot/portcall#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joris-gallot/portcall.git"
+  },
+  "bugs": "https://github.com/joris-gallot/portcall/issues",
   "keywords": [
     "dev-server",
     "ports",
